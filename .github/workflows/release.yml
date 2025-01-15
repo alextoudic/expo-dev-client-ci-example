@@ -1,0 +1,86 @@
+name: Release new app version
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    # REQUIRED: limit concurrency when pushing main(default) branch to prevent conflict for this action to update its fingerprint database
+    concurrency: fingerprint-${{ github.event_name != 'pull_request' && 'main' || github.run_id }}
+    permissions:
+      # REQUIRED: Allow updating fingerprint in acton caches
+      actions: write
+      # Following permissions are required for private repos
+      contents: read
+      packages: write
+
+    steps:
+      - name: 🏗 Setup repo
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 🏗 Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: 📦 Install dependencies
+        run: npm install
+
+      - name: 🔍 Check fingerprint
+        id: fingerprint
+        uses: expo/expo-github-action/fingerprint@main
+
+      - name: 🍒 Set runtime version
+        id: set-runtime-version
+        run: >
+          echo "version=$(echo '${{ steps.fingerprint.outputs.current-fingerprint }}' | sed -E 's/.*,"hash":"(.*)"}/\1/')" >> "${GITHUB_OUTPUT}"
+      
+      - name: 📌 Persist runtime version
+        run: >
+          sed -i 's/"RUNTIME_VERSION": "1"/"RUNTIME_VERSION": "${{ steps.set-runtime-version.outputs.version }}"/' eas.json
+
+      - name: 🏷️ Set build number
+        if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+        id: set-build-number
+        run: >
+          echo "buildNumber=$(date +"%s")" >> "${GITHUB_OUTPUT}"
+
+      - name: 📌 Persist build number
+        if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+        run: >
+          sed -i 's/"BUILD_NUMBER": "1"/"BUILD_NUMBER": "${{ steps.set-build-number.outputs.buildNumber }}"/' eas.json
+  
+      # Updating development builds if needed
+
+      # - name: 🛠️ Generate development builds
+      #   if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      #   run: eas build -p all -e development --non-interactive
+      
+      # - name: 🛠️ Generate development build for iOS simulator
+      #   if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      #   run: eas build -p ios -e simulator --non-interactive
+            
+      # - name: 🛠️ Generate development build for Android emulator and devices
+      #   if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+      #   run: eas build -p android -e development --non-interactive
+
+      # Publishing preview app update
+
+      # Fingerprint didn't changed - publishing changes through EAS Updates
+      - name: 🚀 Create update
+        if: ${{ steps.fingerprint.outputs.fingerprint-diff == '[]' }}
+        run: eas update --channel preview --message "${{ github.event.head_commit.message }}" --non-interactive
+
+      # Fingerprint changed - publishing a new app build
+      - name: 🛠️ Build preview app
+        if: ${{ steps.fingerprint.outputs.fingerprint-diff != '[]' }}
+        run: eas build -p all -e preview --non-interactive
